@@ -2,130 +2,103 @@
 //  ContentView.swift
 //  GitOrigin
 //
+//  Signed-in three-column shell: repo sidebar, workspace column, diff + commit detail.
+//
 
 import SwiftUI
 
 struct ContentView: View {
     @Bindable var store: RepositoryStore
+    @Bindable var auth: GitHubAuthService
+    @State private var workspaceMode: WorkspaceMode = .changes
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
 
     var body: some View {
-        NavigationSplitView {
-            sidebar
-                .navigationSplitViewColumnWidth(min: 260, ideal: 300)
+        NavigationSplitView(columnVisibility: $columnVisibility) {
+            RepositorySidebarView(store: store)
+                .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 320)
+        } content: {
+            WorkspaceColumnView(store: store, mode: $workspaceMode)
+                .navigationSplitViewColumnWidth(min: 260, ideal: 300, max: 380)
         } detail: {
-            detail
-        }
-        .frame(minWidth: 720, minHeight: 480)
-    }
-
-    private var sidebar: some View {
-        GlassEffectContainer(spacing: 12) {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    Text("GitOrigin")
-                        .font(.headline)
-                    Spacer()
-                    if store.isLoadingStatus {
-                        ProgressView()
-                            .controlSize(.small)
-                    }
-                }
-
-                if let branch = store.currentBranch {
-                    Label(branch, systemImage: "arrow.triangle.branch")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                }
-
-                if let repoURL = store.repoURL {
-                    Text(repoURL.path)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                }
-
-                if let error = store.lastError {
-                    Text(error.errorDescription ?? "An unknown error occurred.")
-                        .font(.caption)
-                        .foregroundStyle(.red)
-                        .glassEffect(.regular.tint(.red.opacity(0.15)), in: RoundedRectangle(cornerRadius: 8))
-                }
-
-                if store.changedFiles.isEmpty {
-                    ContentUnavailableView(
-                        store.repoURL == nil ? "No Repository" : "No Changes",
-                        systemImage: "folder",
-                        description: Text(store.repoURL == nil ? "Open a folder to inspect its Git status." : "Working tree is clean.")
-                    )
-                    .frame(maxHeight: .infinity)
-                } else {
-                    List(store.changedFiles) { file in
-                        HStack {
-                            statusBadge(for: file)
-                            Text(file.filepath)
-                                .lineLimit(1)
-                        }
-                    }
-                    .listStyle(.plain)
-                }
-
-                HStack(spacing: 8) {
-                    Button("Open Repository") {
-                        Task { await store.openRepositoryViaPanel() }
-                    }
-                    .buttonStyle(.glass)
-
-                    Button("Refresh") {
-                        Task { await store.refreshStatus() }
-                    }
-                    .buttonStyle(.glass)
-                    .disabled(store.repoURL == nil)
+            VStack(spacing: 0) {
+                DiffDetailView(store: store)
+                if store.repoURL != nil {
+                    Divider()
+                    CommitBoxView(store: store)
                 }
             }
-            .padding()
-            .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 16))
         }
-        .padding()
-    }
+        .toolbar {
+            ToolbarItem(placement: .navigation) {
+                BranchSwitcherMenu(store: store)
+            }
 
-    private var detail: some View {
-        ContentUnavailableView(
-            "Phase 1 — Git Engine",
-            systemImage: "terminal",
-            description: Text("Repository status loads here. Diff view arrives in Phase 3.")
-        )
-        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 16))
-        .padding()
-    }
+            ToolbarItemGroup(placement: .primaryAction) {
+                if store.isSyncing {
+                    ProgressView()
+                        .controlSize(.small)
+                } else {
+                    Button {
+                        Task { await store.push() }
+                    } label: {
+                        Label("Push", systemImage: "arrow.up.circle")
+                    }
+                    .disabled(store.repoURL == nil || store.isSyncing)
+                }
 
-    private func statusBadge(for file: ChangedFile) -> some View {
-        Text(badgeLetter(for: file))
-            .font(.caption.bold())
-            .frame(width: 20, height: 20)
-            .glassEffect(badgeGlass(for: file), in: Circle())
-    }
-
-    private func badgeLetter(for file: ChangedFile) -> String {
-        switch file.status {
-        case .modified: "M"
-        case .added: "A"
-        case .deleted: "D"
-        case .untracked: "?"
-        case .renamed: "R"
+                if let session = auth.session {
+                    Menu {
+                        Button("Sign Out", role: .destructive) {
+                            auth.signOut()
+                        }
+                    } label: {
+                        Label(session.login, systemImage: "person.crop.circle")
+                    }
+                }
+            }
+        }
+        .frame(minWidth: 980, minHeight: 620)
+        .sheet(isPresented: $store.showCreateBranchSheet) {
+            CreateBranchSheet(store: store)
+        }
+        .alert(item: $store.presentedAlert) { alert in
+            Alert(
+                title: Text(alert.title),
+                message: Text(alert.message),
+                dismissButton: .default(Text("OK"))
+            )
+        }
+        .alert(
+            "Uncommitted Changes",
+            isPresented: $store.showDirtyCheckoutConfirmation
+        ) {
+            Button("Cancel", role: .cancel) {
+                store.cancelCheckout()
+            }
+            Button("Checkout Anyway", role: .destructive) {
+                Task { await store.confirmCheckout() }
+            }
+        } message: {
+            if let branch = store.pendingCheckoutBranch {
+                Text("You have uncommitted changes. Checking out “\(branch.name)” may fail or carry changes over.")
+            }
+        }
+        .task {
+            await store.refreshRepositoryCatalog()
+            await store.refreshBranches()
         }
     }
 
-    private func badgeGlass(for file: ChangedFile) -> Glass {
-        switch file.status {
-        case .modified: .regular.tint(.orange.opacity(0.35))
-        case .added: .regular.tint(.green.opacity(0.35))
-        case .deleted: .regular.tint(.red.opacity(0.35))
-        case .untracked: .regular.tint(.blue.opacity(0.35))
-        case .renamed: .regular.tint(.purple.opacity(0.35))
-        }
+    private func toggleRepositorySidebar() {
+        columnVisibility = columnVisibility == .all ? .doubleColumn : .all
     }
 }
 
-#Preview {
-    ContentView(store: RepositoryStore())
+#Preview("Empty") {
+    ContentView(store: RepositoryStore(auth: .previewSignedIn), auth: .previewSignedIn)
+}
+
+#Preview("With Changes") {
+    ContentView(store: .previewWithChanges, auth: .previewSignedIn)
 }

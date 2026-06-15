@@ -2,6 +2,8 @@
 //  ChangedFile.swift
 //  GitOrigin
 //
+//  One changed path in the working tree with status and staging state.
+//
 
 import Foundation
 

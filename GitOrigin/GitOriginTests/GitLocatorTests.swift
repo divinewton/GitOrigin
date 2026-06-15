@@ -2,6 +2,8 @@
 //  GitLocatorTests.swift
 //  GitOriginTests
 //
+//  Integration test that locates a system Git binary (skipped if none).
+//
 
 import XCTest
 @testable import GitOrigin
@@ -13,7 +15,7 @@ final class GitLocatorTests: XCTestCase {
         }
 
         XCTAssertTrue(url.path.hasSuffix("/git"))
+        XCTAssertNotEqual(url.path, "/usr/bin/git")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: url.path))
-        XCTAssertFalse(url.path == "/usr/bin/git", "Should prefer real git over the /usr/bin shim.")
     }
 }

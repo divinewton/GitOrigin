@@ -2,6 +2,8 @@
 //  DiffLine.swift
 //  GitOrigin
 //
+//  Single line in a unified diff with type (context/addition/deletion/header).
+//
 
 import Foundation
 

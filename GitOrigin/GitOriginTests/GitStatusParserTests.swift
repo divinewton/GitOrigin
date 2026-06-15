@@ -2,6 +2,8 @@
 //  GitStatusParserTests.swift
 //  GitOriginTests
 //
+//  Unit tests for GitStatusParser porcelain fixtures.
+//
 
 import XCTest
 @testable import GitOrigin

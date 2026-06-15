@@ -2,11 +2,13 @@
 //  GitLocator.swift
 //  GitOrigin
 //
+//  Finds a real Git binary on the machine (CLT, Xcode, or Homebrew).
+//
 
 import Foundation
 
 enum GitLocator {
-    /// Resolves a real `git` binary without invoking `xcrun` (blocked in App Sandbox).
+    /// Resolves a real Git binary. Never uses `/usr/bin/git` (xcrun shim) or `xcrun`.
     static func locateGitExecutable() -> URL? {
         for path in candidatePaths where FileManager.default.isExecutableFile(atPath: path) {
             return URL(fileURLWithPath: path)

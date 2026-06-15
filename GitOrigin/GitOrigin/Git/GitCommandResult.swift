@@ -2,6 +2,8 @@
 //  GitCommandResult.swift
 //  GitOrigin
 //
+//  stdout, stderr, and exit code tuple returned by GitExecutor.run.
+//
 
 import Foundation
 

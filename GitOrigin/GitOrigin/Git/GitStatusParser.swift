@@ -2,6 +2,8 @@
 //  GitStatusParser.swift
 //  GitOrigin
 //
+//  Parses `git status --porcelain` output into ChangedFile models.
+//
 
 import Foundation
 

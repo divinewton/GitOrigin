@@ -2,6 +2,8 @@
 //  FileStatus.swift
 //  GitOrigin
 //
+//  Porcelain file change type (modified, added, deleted, etc.).
+//
 
 import Foundation
 
