@@ -34,6 +34,11 @@ struct WorkspaceColumnView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            if store.repoURL != nil, mode == .changes {
+                Divider()
+                CommitBoxView(store: store)
+            }
         }
         .navigationTitle(workspaceTitle)
         .onChange(of: store.preferredWorkspaceMode) { _, newMode in

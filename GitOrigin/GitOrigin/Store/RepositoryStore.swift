@@ -27,7 +27,6 @@ final class RepositoryStore {
     var isLoadingHistory = false
     var isLoadingBranches = false
     var isLoadingPullRequests = false
-    var isLoadingCatalog = false
     var presentedAlert: RepositoryAlert?
 
     // MARK: - Branches, history, and catalog
@@ -54,16 +53,37 @@ final class RepositoryStore {
 
     var commitSummary = ""
     var commitDescription = ""
+    var commitCoAuthors = ""
     var isCommitFieldFocused = false
+
+    var lastFetchedAt: Date?
+
+    // MARK: - Repository sidebar sheets
+
+    var activeRepositorySheet: RepositorySheet?
+    var pendingRepositoryRemoval: RepositoryCatalogItem?
+    var newRepoName = ""
+    var newRepoDescription = ""
+    var newRepoIsPrivate = false
+    var newRepoDestinationURL: URL?
+    var isCreatingRepository = false
+
+    var cloneSourceMode: CloneSourceMode = .myRepositories
+    var cloneCandidates: [GitHubRemoteRepository] = []
+    var selectedCloneCandidateID: String?
+    var publicCloneReference = ""
+    var cloneDestinationURL: URL?
+    var isLoadingCloneCandidates = false
+    var isCloningRepository = false
 
     private let auth: GitHubAuthService
     private let git = GitExecutor.shared
     private let github = GitHubOAuthClient.shared
     private let repoAccess = RepoAccessManager()
+    private let addedRegistry = AddedRepositoryRegistry()
     private let repoWatcher = GitRepoWatcher()
     private var diffLoadTask: Task<Void, Never>?
     private var isRefreshingStatus = false
-    private var originCache: [String: String] = [:]
 
     init(auth: GitHubAuthService) {
         self.auth = auth
@@ -98,82 +118,124 @@ final class RepositoryStore {
         changedFiles.filter { $0.stagingState == .staged || $0.stagingState == .partiallyStaged }.count
     }
 
-    func presentError(_ error: GitError) {
-        presentedAlert = RepositoryAlert(
-            title: "Error",
-            message: error.errorDescription ?? "An unknown error occurred."
-        )
+    var preferredRemoteSyncAction: RemoteSyncAction {
+        if upstreamStatus.behind > 0 { return .pull }
+        if upstreamStatus.ahead > 0 { return .push }
+        return .fetch
     }
 
-    /// Shows a generic alert in ContentView via `.alert(item:)`.
-    func presentAlert(title: String, message: String) {
-        presentedAlert = RepositoryAlert(title: title, message: message)
+    var lastFetchedDisplay: String {
+        guard let lastFetchedAt else { return "Never fetched" }
+        return "Last fetched \(Self.relativeFetchFormatter.localizedString(for: lastFetchedAt, relativeTo: Date()))"
     }
 
-    func refreshRepositoryCatalog() async {
-        isLoadingCatalog = true
-        defer { isLoadingCatalog = false }
+    private static let relativeFetchFormatter: RelativeDateTimeFormatter = {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .full
+        return formatter
+    }()
 
-        guard let token = try? GitHubKeychain.loadAccessToken() else {
-            catalogItems = localOnlyCatalogItems()
+    var newRepoDestinationPath: String {
+        newRepoDestinationURL?.path ?? defaultCloneContainerPathDisplay
+    }
+
+    var cloneDestinationPath: String {
+        cloneDestinationURL?.path ?? defaultCloneContainerPathDisplay
+    }
+
+    var canClone: Bool {
+        if isCloningRepository { return false }
+        if cloneSourceMode == .myRepositories {
+            return selectedCloneCandidateID != nil
+        }
+        return !publicCloneReference.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var hasAddedRepositories: Bool {
+        !catalogItems.isEmpty
+    }
+
+    private var defaultCloneContainerPathDisplay: String {
+        CloneLocationSettings.defaultContainerURL()?.path ?? "Choose a folder"
+    }
+
+    func presentAddExistingSheet() {
+        activeRepositorySheet = .addExisting
+    }
+
+    func presentCreateSheet() {
+        activeRepositorySheet = .create
+    }
+
+    func presentCloneSheetIfReady() {
+        if CloneLocationSettings.isConfigured {
+            activeRepositorySheet = .clone
+        } else {
+            activeRepositorySheet = .setCloneLocation
+        }
+    }
+
+    func prepareCreateRepositorySheet() {
+        newRepoName = ""
+        newRepoDescription = ""
+        newRepoIsPrivate = false
+        newRepoDestinationURL = CloneLocationSettings.defaultContainerURL()
+    }
+
+    func prepareCloneSheet() {
+        cloneSourceMode = .myRepositories
+        publicCloneReference = ""
+        cloneDestinationURL = CloneLocationSettings.defaultContainerURL()
+        selectedCloneCandidateID = cloneCandidates.first?.id
+    }
+
+    func chooseCreateRepositoryDestination() {
+        guard let url = repoAccess.promptForDestinationDirectory() else { return }
+        newRepoDestinationURL = url
+    }
+
+    func chooseCloneDestination() {
+        guard let url = repoAccess.promptForDestinationDirectory() else { return }
+        cloneDestinationURL = url
+    }
+
+    func configureDefaultCloneLocationFromPanel() async {
+        guard let parent = repoAccess.promptForParentDirectory() else { return }
+        guard parent.startAccessingSecurityScopedResource() else {
+            presentError(.accessDenied)
             return
         }
+        defer { parent.stopAccessingSecurityScopedResource() }
 
         do {
-            let remoteRepos = try await github.fetchUserRepositories(accessToken: token)
-            var items: [RepositoryCatalogItem] = []
-
-            for repo in remoteRepos {
-                let localURL = repoAccess.linkedLocalURL(forGitHubFullName: repo.fullName)
-                items.append(
-                    RepositoryCatalogItem(
-                        id: "github-\(repo.fullName)",
-                        title: repo.name,
-                        subtitle: repo.fullName,
-                        fullName: repo.fullName,
-                        localURL: localURL,
-                        htmlURL: repo.htmlURL,
-                        source: .github
-                    )
-                )
-            }
-
-            let linkedPaths = Set(
-                items.compactMap { item in
-                    item.localURL.map { RepoAccessManager.normalizedPath($0) }
-                }
-            )
-            let apiFullNames = Set(remoteRepos.map(\.fullName))
-            items.append(contentsOf: clonedCatalogItems(apiFullNames: apiFullNames, excludingPaths: linkedPaths))
-
-            let shownPaths = Set(
-                items.compactMap { item in
-                    item.localURL.map { RepoAccessManager.normalizedPath($0) }
-                }
-            )
-            items.append(contentsOf: localOnlyCatalogItems(excludingPaths: shownPaths))
-            catalogItems = sortCatalogByRecency(items)
+            try CloneLocationSettings.configure(parentDirectory: parent)
+            cloneDestinationURL = CloneLocationSettings.defaultContainerURL()
+            newRepoDestinationURL = cloneDestinationURL
         } catch {
-            catalogItems = localOnlyCatalogItems()
+            presentAlert(title: "Clone Location", message: error.localizedDescription)
+        }
+    }
+
+    func preloadRepositorySheetData() async {
+        await loadCloneCandidatesIfNeeded()
+    }
+
+    func loadCloneCandidatesIfNeeded() async {
+        guard cloneCandidates.isEmpty else { return }
+        guard let token = GitHubKeychain.loadAccessToken() else { return }
+
+        isLoadingCloneCandidates = true
+        defer { isLoadingCloneCandidates = false }
+
+        do {
+            cloneCandidates = try await github.fetchUserRepositories(accessToken: token)
+            selectedCloneCandidateID = cloneCandidates.first?.id
+        } catch {
             presentAlert(title: "GitHub Repositories", message: error.localizedDescription)
         }
     }
 
-    func openCatalogItem(_ item: RepositoryCatalogItem) async {
-        if let localURL = item.localURL {
-            await openRepository(at: localURL)
-            return
-        }
-
-        if item.source == .github || item.source == .cloned {
-            await locateLocalFolder(for: item)
-            return
-        }
-
-        await openRepositoryViaPanel()
-    }
-
-    func locateLocalFolder(for item: RepositoryCatalogItem) async {
+    func addExistingRepositoryFromPanel() async {
         guard let url = repoAccess.promptForRepository() else { return }
 
         guard let accessed = repoAccess.beginAccess(to: url) else {
@@ -191,20 +253,8 @@ final class RepositoryStore {
                 return
             }
 
-            if let expectedFullName = item.fullName {
-                guard let origin = try await git.originURL(in: accessed),
-                      matches(fullName: expectedFullName, originURL: origin) else {
-                    presentAlert(
-                        title: "Different Repository",
-                        message: "This folder’s Git remote does not match “\(expectedFullName)”. Choose the correct folder or clone the repository first."
-                    )
-                    repoAccess.endAccess()
-                    return
-                }
-                repoAccess.linkGitHubRepository(fullName: expectedFullName, localURL: accessed)
-            }
-
-            await openRepository(at: accessed)
+            activeRepositorySheet = nil
+            await registerAndOpenRepository(at: accessed)
         } catch let error as GitError {
             repoAccess.endAccess()
             presentError(error)
@@ -214,25 +264,217 @@ final class RepositoryStore {
         }
     }
 
+    func createRepositoryOnGitHub() async {
+        guard let token = GitHubKeychain.loadAccessToken() else { return }
+
+        let name = newRepoName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+
+        guard let container = newRepoDestinationURL ?? CloneLocationSettings.defaultContainerURL() else {
+            activeRepositorySheet = .setCloneLocation
+            return
+        }
+
+        isCreatingRepository = true
+        defer { isCreatingRepository = false }
+
+        do {
+            let remote = try await github.createRepository(
+                name: name,
+                description: newRepoDescription.trimmingCharacters(in: .whitespacesAndNewlines),
+                isPrivate: newRepoIsPrivate,
+                accessToken: token
+            )
+
+            guard container.startAccessingSecurityScopedResource() else {
+                presentError(.accessDenied)
+                return
+            }
+            defer { container.stopAccessingSecurityScopedResource() }
+
+            let destination = CloneLocationSettings.destinationURL(forRepositoryNamed: remote.name, in: container)
+            try await git.clone(from: remote.cloneURL.absoluteString, into: remote.name, parentDirectory: container)
+
+            activeRepositorySheet = nil
+            await registerAndOpenRepository(at: destination, remote: remote)
+        } catch let error as GitHubOAuthClientError {
+            presentAlert(title: "Create Repository", message: error.localizedDescription ?? "Request failed.")
+        } catch let error as GitError {
+            presentError(error)
+        } catch {
+            presentError(.commandFailed(message: error.localizedDescription))
+        }
+    }
+
+    func cloneSelectedRepository() async {
+        isCloningRepository = true
+        defer { isCloningRepository = false }
+
+        do {
+            let remote: GitHubRemoteRepository
+            if cloneSourceMode == .myRepositories {
+                guard let id = selectedCloneCandidateID,
+                      let selected = cloneCandidates.first(where: { $0.id == id }) else {
+                    return
+                }
+                remote = selected
+            } else {
+                let reference = publicCloneReference.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard let parsed = GitRemoteURLParser.parseGitHubReference(from: reference) else {
+                    presentAlert(title: "Invalid Repository", message: "Enter owner/repo or a github.com URL.")
+                    return
+                }
+                let token = GitHubKeychain.loadAccessToken()
+                remote = try await github.fetchRepository(
+                    owner: parsed.owner,
+                    repo: parsed.name,
+                    accessToken: token
+                )
+            }
+
+            guard let container = cloneDestinationURL ?? CloneLocationSettings.defaultContainerURL() else {
+                activeRepositorySheet = .setCloneLocation
+                return
+            }
+
+            guard container.startAccessingSecurityScopedResource() else {
+                presentError(.accessDenied)
+                return
+            }
+            defer { container.stopAccessingSecurityScopedResource() }
+
+            let destination = CloneLocationSettings.destinationURL(forRepositoryNamed: remote.name, in: container)
+            if FileManager.default.fileExists(atPath: destination.path) {
+                presentAlert(title: "Already Exists", message: "A folder named “\(remote.name)” already exists at the clone location.")
+                return
+            }
+
+            try await git.clone(from: remote.cloneURL.absoluteString, into: remote.name, parentDirectory: container)
+            activeRepositorySheet = nil
+            await registerAndOpenRepository(at: destination, remote: remote)
+        } catch let error as GitHubOAuthClientError {
+            presentAlert(title: "Clone Repository", message: error.localizedDescription ?? "Request failed.")
+        } catch let error as GitError {
+            presentError(error)
+        } catch {
+            presentError(.commandFailed(message: error.localizedDescription))
+        }
+    }
+
+    func presentError(_ error: GitError) {
+        presentedAlert = RepositoryAlert(
+            title: "Error",
+            message: error.errorDescription ?? "An unknown error occurred."
+        )
+    }
+
+    /// Shows a generic alert in ContentView via `.alert(item:)`.
+    func presentAlert(title: String, message: String) {
+        presentedAlert = RepositoryAlert(title: title, message: message)
+    }
+
+    func refreshRepositoryCatalog() {
+        catalogItems = addedRegistry.catalogItems()
+    }
+
+    func openCatalogItem(_ item: RepositoryCatalogItem) async {
+        await openRepository(at: item.localURL)
+    }
+
     func openCatalogItemOnGitHub(_ item: RepositoryCatalogItem) {
         guard let htmlURL = item.htmlURL else { return }
         NSWorkspace.shared.open(htmlURL)
     }
 
     func revealCatalogItemInFinder(_ item: RepositoryCatalogItem) {
-        guard let localURL = item.localURL else { return }
-        NSWorkspace.shared.activateFileViewerSelecting([localURL])
+        NSWorkspace.shared.activateFileViewerSelecting([item.localURL])
     }
 
-    func unlinkLocalFolder(for item: RepositoryCatalogItem) async {
-        guard let fullName = item.fullName else { return }
-        repoAccess.unlinkGitHubRepository(fullName: fullName)
-        await refreshRepositoryCatalog()
+    func openCatalogItemInEditor(_ item: RepositoryCatalogItem, editor: ExternalEditor) {
+        ExternalEditorDiscovery.open(item.localURL, with: editor)
     }
 
-    func openRepositoryViaPanel() async {
-        guard let url = repoAccess.promptForRepository() else { return }
+    func openChangedFileInEditor(_ file: ChangedFile, editor: ExternalEditor) {
+        guard let repoURL else { return }
+        let fileURL = repoURL.appendingPathComponent(file.filepath)
+        ExternalEditorDiscovery.openFile(fileURL, with: editor)
+    }
+
+    func requestRemoveAddedRepository(_ item: RepositoryCatalogItem) {
+        pendingRepositoryRemoval = item
+    }
+
+    func cancelRemoveAddedRepository() {
+        pendingRepositoryRemoval = nil
+    }
+
+    func confirmRemoveAddedRepository(moveToTrash: Bool) {
+        guard let item = pendingRepositoryRemoval else { return }
+        pendingRepositoryRemoval = nil
+
+        if moveToTrash {
+            trashRepositoryFolder(at: item.localURL)
+        }
+
+        if let repoURL,
+           RepoAccessManager.normalizedPath(item.localURL) == RepoAccessManager.normalizedPath(repoURL) {
+            closeRepository()
+        }
+
+        addedRegistry.remove(id: item.id)
+        refreshRepositoryCatalog()
+    }
+
+    private func trashRepositoryFolder(at url: URL) {
+        guard url.startAccessingSecurityScopedResource() else {
+            presentAlert(title: "Move to Trash", message: "GitOrigin could not access the repository folder.")
+            return
+        }
+        defer { url.stopAccessingSecurityScopedResource() }
+
+        do {
+            try FileManager.default.trashItem(at: url, resultingItemURL: nil)
+        } catch {
+            presentAlert(title: "Move to Trash", message: error.localizedDescription)
+        }
+    }
+
+    private func registerAndOpenRepository(
+        at url: URL,
+        remote: GitHubRemoteRepository? = nil
+    ) async {
+        let metadata = await repositoryMetadata(for: url, remote: remote)
+        addedRegistry.register(
+            localURL: url,
+            owner: metadata.owner,
+            name: metadata.name,
+            fullName: metadata.fullName,
+            htmlURL: metadata.htmlURL
+        )
+        refreshRepositoryCatalog()
         await openRepository(at: url)
+    }
+
+    private func repositoryMetadata(
+        for url: URL,
+        remote: GitHubRemoteRepository?
+    ) async -> (owner: String, name: String, fullName: String?, htmlURL: URL?) {
+        if let remote {
+            return (remote.owner, remote.name, remote.fullName, remote.htmlURL)
+        }
+
+        if let origin = try? await git.originURL(in: url),
+           let parsed = GitRemoteURLParser.parseGitHubRepository(from: origin) {
+            let fullName = "\(parsed.owner)/\(parsed.name)"
+            return (
+                parsed.owner,
+                parsed.name,
+                fullName,
+                URL(string: "https://github.com/\(fullName)")
+            )
+        }
+
+        return ("Local", url.lastPathComponent, nil, nil)
     }
 
     func openRepository(at url: URL) async {
@@ -262,13 +504,6 @@ final class RepositoryStore {
 
             repoURL = workingURL
             repoAccess.addRecentRepository(workingURL)
-            if let origin = try await git.originURL(in: workingURL) {
-                originCache[workingURL.path] = origin
-                if let parsed = GitRemoteURLParser.parseGitHubRepository(from: origin) {
-                    let fullName = "\(parsed.owner)/\(parsed.name)"
-                    repoAccess.linkGitHubRepository(fullName: fullName, localURL: workingURL)
-                }
-            }
 
             historyBranchName = nil
             startWatchingRepository(at: workingURL)
@@ -278,7 +513,7 @@ final class RepositoryStore {
             await syncWithRemoteAfterOpen()
             await refreshRepositoryMetadata()
             await refreshPullRequests()
-            await refreshRepositoryCatalog()
+            refreshRepositoryCatalog()
         } catch let error as GitError {
             repoAccess.endAccess()
             presentError(error)
@@ -311,6 +546,8 @@ final class RepositoryStore {
         historyBranchName = nil
         commitSummary = ""
         commitDescription = ""
+        commitCoAuthors = ""
+        lastFetchedAt = nil
         repoURL = nil
         repoWatcher.stop()
         repoAccess.endAccess()
@@ -378,9 +615,7 @@ final class RepositoryStore {
                 return
             }
 
-            originCache[repoURL.path] = originURL
-
-            if let token = try? GitHubKeychain.loadAccessToken() {
+            if let token = GitHubKeychain.loadAccessToken() {
                 githubRepository = try await github.fetchRepositoryMetadata(
                     owner: parsed.owner,
                     repo: parsed.name,
@@ -404,7 +639,7 @@ final class RepositoryStore {
             pullRequests = []
             return
         }
-        guard let token = try? GitHubKeychain.loadAccessToken() else {
+        guard let token = GitHubKeychain.loadAccessToken() else {
             pullRequests = []
             return
         }
@@ -547,11 +782,16 @@ final class RepositoryStore {
         }
     }
 
-    func fetch() async { await sync { try await git.fetch(in: $0) } }
-    func pull() async { await sync { try await git.pull(in: $0) } }
+    func fetch() async {
+        await sync(updatesFetchTimestamp: true) { try await git.fetch(in: $0) }
+    }
+
+    func pull() async {
+        await sync(updatesFetchTimestamp: true) { try await git.pull(in: $0) }
+    }
 
     func push() async {
-        await sync { url in
+        await sync(updatesFetchTimestamp: false) { url in
             if upstreamStatus.upstreamName == nil, let branch = currentBranch {
                 try await git.push(setUpstream: branch, in: url)
             } else {
@@ -560,7 +800,20 @@ final class RepositoryStore {
         }
     }
 
+    func performPreferredRemoteSync() async {
+        switch preferredRemoteSyncAction {
+        case .fetch:
+            await fetch()
+        case .pull:
+            await pull()
+        case .push:
+            await push()
+        }
+    }
+
     func selectFile(_ file: ChangedFile?) {
+        if selectedFile?.id == file?.id { return }
+
         selectedFile = file
         if let file {
             loadDiff(for: file)
@@ -575,6 +828,7 @@ final class RepositoryStore {
             selectFile(nil)
             return
         }
+        if selectedFile?.id == id { return }
         selectFile(changedFiles.first { $0.id == id })
     }
 
@@ -608,25 +862,27 @@ final class RepositoryStore {
     }
 
     func stage(file: ChangedFile) async {
-        await mutateRepository { try await git.stage(path: file.filepath, in: $0) }
+        await mutateStaging { try await git.stage(path: file.filepath, in: $0) }
     }
 
     func unstage(file: ChangedFile) async {
-        await mutateRepository { try await git.unstage(path: file.filepath, in: $0) }
+        await mutateStaging { try await git.unstage(path: file.filepath, in: $0) }
     }
 
-    func stageSelectedFile() async {
-        guard let file = selectedFile else { return }
-        await stage(file: file)
-    }
+    func stageAll() async { await mutateStaging { try await git.stageAll(in: $0) } }
+    func unstageAll() async { await mutateStaging { try await git.unstageAll(in: $0) } }
 
-    func unstageSelectedFile() async {
-        guard let file = selectedFile else { return }
-        await unstage(file: file)
-    }
+    func discardChanges(for file: ChangedFile) async {
+        let discardedFileID = file.id
+        await mutateStaging { try await git.discardChanges(for: file, in: $0) }
 
-    func stageAll() async { await mutateRepository { try await git.stageAll(in: $0) } }
-    func unstageAll() async { await mutateRepository { try await git.unstageAll(in: $0) } }
+        if selectedFile?.id == discardedFileID,
+           !changedFiles.contains(where: { $0.id == discardedFileID }) {
+            cancelDiffLoad()
+            selectedFile = nil
+            currentDiff = []
+        }
+    }
 
     func commit() async {
         guard let repoURL else { return }
@@ -635,6 +891,7 @@ final class RepositoryStore {
         guard !summary.isEmpty else { return }
 
         let body = commitDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+        let fullBody = Self.commitBody(description: body, coAuthors: commitCoAuthors)
 
         isCommitting = true
         defer { isCommitting = false }
@@ -647,12 +904,13 @@ final class RepositoryStore {
 
             try await git.commit(
                 summary: summary,
-                body: body.isEmpty ? nil : body,
+                body: fullBody,
                 author: auth.commitAuthor,
                 in: repoURL
             )
             commitSummary = ""
             commitDescription = ""
+            commitCoAuthors = ""
             cancelDiffLoad()
             selectedFile = nil
             currentDiff = []
@@ -700,7 +958,7 @@ final class RepositoryStore {
         }
     }
 
-    private func sync(_ operation: (URL) async throws -> Void) async {
+    private func sync(updatesFetchTimestamp: Bool, _ operation: (URL) async throws -> Void) async {
         guard let repoURL else { return }
 
         isSyncing = true
@@ -708,10 +966,74 @@ final class RepositoryStore {
 
         do {
             try await operation(repoURL)
+            if updatesFetchTimestamp {
+                lastFetchedAt = Date()
+            }
             await refreshStatus()
             await refreshHistory(for: historyBranchName)
             await refreshBranches()
             await refreshPullRequests()
+        } catch let error as GitError {
+            presentError(error)
+        } catch {
+            presentError(.commandFailed(message: error.localizedDescription))
+        }
+    }
+
+    private static func commitBody(description: String, coAuthors: String) -> String? {
+        let coAuthorLines = coAuthors
+            .split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .map { line in
+                line.hasPrefix("Co-authored-by:") ? line : "Co-authored-by: \(line)"
+            }
+
+        switch (description.isEmpty, coAuthorLines.isEmpty) {
+        case (true, true):
+            return nil
+        case (false, true):
+            return description
+        case (true, false):
+            return coAuthorLines.joined(separator: "\n")
+        case (false, false):
+            return description + "\n\n" + coAuthorLines.joined(separator: "\n")
+        }
+    }
+
+    private func mutateStaging(_ operation: (URL) async throws -> Void) async {
+        guard let repoURL else { return }
+
+        repoWatcher.pause()
+        defer { repoWatcher.resume() }
+
+        do {
+            try await operation(repoURL)
+            await refreshChangedFilesOnly()
+        } catch let error as GitError {
+            presentError(error)
+        } catch {
+            presentError(.commandFailed(message: error.localizedDescription))
+        }
+    }
+
+    private func refreshChangedFilesOnly() async {
+        guard let repoURL else { return }
+
+        let selectedID = selectedFile?.id
+
+        do {
+            let resolvedFiles = try await git.status(in: repoURL)
+            changedFiles = resolvedFiles
+
+            if let selectedID,
+               let file = resolvedFiles.first(where: { $0.id == selectedID }) {
+                selectedFile = file
+            } else if selectedID != nil {
+                cancelDiffLoad()
+                selectedFile = nil
+                currentDiff = []
+            }
         } catch let error as GitError {
             presentError(error)
         } catch {
@@ -735,65 +1057,6 @@ final class RepositoryStore {
         }
     }
 
-    private func clonedCatalogItems(
-        apiFullNames: Set<String>,
-        excludingPaths: Set<String>
-    ) -> [RepositoryCatalogItem] {
-        repoAccess.allGitHubLinks().compactMap { fullName, localURL in
-            guard !apiFullNames.contains(fullName) else { return nil }
-
-            let path = RepoAccessManager.normalizedPath(localURL)
-            guard !excludingPaths.contains(path) else { return nil }
-
-            let name = fullName.split(separator: "/").last.map(String.init) ?? fullName
-            return RepositoryCatalogItem(
-                id: "cloned-\(fullName)",
-                title: name,
-                subtitle: fullName,
-                fullName: fullName,
-                localURL: localURL,
-                htmlURL: URL(string: "https://github.com/\(fullName)"),
-                source: .cloned
-            )
-        }
-    }
-
-    private func localOnlyCatalogItems(excludingPaths: Set<String> = []) -> [RepositoryCatalogItem] {
-        repoAccess.recentRepositoryPathOrder().compactMap { path in
-            guard !excludingPaths.contains(path) else { return nil }
-            guard repoAccess.linkedFullName(forLocalPath: path) == nil else { return nil }
-
-            let url = URL(fileURLWithPath: path, isDirectory: true)
-            return RepositoryCatalogItem(
-                id: "local-\(path)",
-                title: url.lastPathComponent,
-                subtitle: url.deletingLastPathComponent().path,
-                fullName: nil,
-                localURL: url,
-                htmlURL: nil,
-                source: .localOnly
-            )
-        }
-    }
-
-    private func sortCatalogByRecency(_ items: [RepositoryCatalogItem]) -> [RepositoryCatalogItem] {
-        let recentOrder = repoAccess.recentRepositoryPathOrder()
-
-        func recencyRank(for item: RepositoryCatalogItem) -> Int {
-            guard let path = item.localURL.map({ RepoAccessManager.normalizedPath($0) }) else {
-                return Int.max
-            }
-            return recentOrder.firstIndex(of: path) ?? Int.max
-        }
-
-        return items.sorted { lhs, rhs in
-            let left = recencyRank(for: lhs)
-            let right = recencyRank(for: rhs)
-            if left != right { return left < right }
-            return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
-        }
-    }
-
     private func syncWithRemoteAfterOpen() async {
         guard let repoURL else { return }
 
@@ -802,6 +1065,7 @@ final class RepositoryStore {
 
         do {
             try await git.fetch(in: repoURL)
+            lastFetchedAt = Date()
             await refreshBranches()
             await refreshHistory(for: historyBranchName ?? currentBranch)
             await refreshStatus()
@@ -812,13 +1076,6 @@ final class RepositoryStore {
         } catch {
             // Network errors on open are non-fatal; local branches and history still work.
         }
-    }
-
-    private func matches(fullName: String, originURL: String) -> Bool {
-        guard let parsed = GitRemoteURLParser.parseGitHubRepository(from: originURL) else {
-            return false
-        }
-        return "\(parsed.owner)/\(parsed.name)" == fullName
     }
 
     private func cancelDiffLoad() {
@@ -855,6 +1112,16 @@ extension RepositoryStore {
             DiffLine(id: 1, text: " import SwiftUI", type: .context),
             DiffLine(id: 2, text: "+import Observation", type: .addition),
             DiffLine(id: 3, text: "-import Combine", type: .deletion),
+        ]
+        store.catalogItems = [
+            RepositoryCatalogItem(
+                id: "octocat/Hello-World",
+                owner: "octocat",
+                name: "Hello-World",
+                fullName: "octocat/Hello-World",
+                localURL: store.repoURL!,
+                htmlURL: URL(string: "https://github.com/octocat/Hello-World")
+            ),
         ]
         return store
     }

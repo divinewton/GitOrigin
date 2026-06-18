@@ -2,7 +2,7 @@
 //  ChangedFileBadge.swift
 //  GitOrigin
 //
-//  Compact status letter and staging indicator for a changed file row.
+//  Compact status letter for a changed file row.
 //
 
 import SwiftUI
@@ -11,20 +11,12 @@ struct ChangedFileBadge: View {
     let file: ChangedFile
 
     var body: some View {
-        HStack(spacing: 4) {
-            Text(statusLetter)
-                .font(.caption2.bold())
-                .foregroundStyle(.white)
-                .frame(width: 18, height: 18)
-                .background(statusColor, in: Circle())
-
-            if file.stagingState != .unstaged {
-                Image(systemName: stagingSymbol)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .accessibilityLabel(accessibilityLabel)
+        Text(statusLetter)
+            .font(.caption2.bold())
+            .foregroundStyle(.white)
+            .frame(width: 18, height: 18)
+            .background(statusColor, in: Circle())
+            .accessibilityLabel(accessibilityLabel)
     }
 
     private var statusLetter: String {
@@ -44,14 +36,6 @@ struct ChangedFileBadge: View {
         case .deleted: .red
         case .untracked: .blue
         case .renamed: .purple
-        }
-    }
-
-    private var stagingSymbol: String {
-        switch file.stagingState {
-        case .staged: "checkmark.circle.fill"
-        case .partiallyStaged: "circle.lefthalf.filled"
-        case .unstaged: ""
         }
     }
 

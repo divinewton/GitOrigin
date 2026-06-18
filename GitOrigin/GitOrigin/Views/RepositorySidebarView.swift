@@ -2,7 +2,7 @@
 //  RepositorySidebarView.swift
 //  GitOrigin
 //
-//  Repository list from GitHub (with optional local links) plus local-only folders.
+//  Searchable sidebar of repositories added through GitOrigin, grouped by owner.
 //
 
 import AppKit
@@ -11,30 +11,54 @@ import SwiftUI
 struct RepositorySidebarView: View {
     @Bindable var store: RepositoryStore
 
+    @State private var searchText = ""
     @State private var isRecentExpanded = true
-    @State private var isClonedExpanded = true
-    @State private var isGitHubExpanded = true
-    @State private var isLocalOnlyExpanded = true
+    @State private var expandedOwners: Set<String> = []
+    @State private var hoveredRepositoryID: String?
 
     var body: some View {
-        List {
-            Section {
-                Button {
-                    Task { await store.openRepositoryViaPanel() }
-                } label: {
-                    Label("Open Folder…", systemImage: "folder.badge.plus")
-                }
+        VStack(spacing: 0) {
+            sidebarControls
+            Divider()
+            repositoryList
+        }
+        .navigationTitle("Repositories")
+        .onAppear {
+            expandedOwners = Set(ownerSections.map(\.id))
+            store.refreshRepositoryCatalog()
+        }
+        .onChange(of: store.catalogItems.count) { _, _ in
+            expandedOwners.formUnion(Set(ownerSections.map(\.id)))
+        }
+    }
 
-                Button {
-                    Task { await store.refreshRepositoryCatalog() }
-                } label: {
-                    Label("Refresh List", systemImage: "arrow.clockwise")
-                }
+    private var sidebarControls: some View {
+        HStack(spacing: 8) {
+            TextField("Search repositories", text: $searchText)
+                .textFieldStyle(.roundedBorder)
+
+            RepositoryAddMenu(store: store) {
+                Text("Add")
+            }
+            .fixedSize()
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+    }
+
+    private var repositoryList: some View {
+        List {
+            if filteredRecentItems.isEmpty && filteredOwnerSections.isEmpty && !searchText.isEmpty {
+                ContentUnavailableView(
+                    "No Results",
+                    systemImage: "magnifyingglass",
+                    description: Text("No repositories match your search.")
+                )
             }
 
-            if !recentItems.isEmpty {
+            if !filteredRecentItems.isEmpty {
                 Section(isExpanded: $isRecentExpanded) {
-                    ForEach(recentItems) { item in
+                    ForEach(filteredRecentItems) { item in
                         repositoryRow(item)
                     }
                 } header: {
@@ -42,64 +66,40 @@ struct RepositorySidebarView: View {
                 }
             }
 
-            if !remainingClonedItems.isEmpty {
-                Section(isExpanded: $isClonedExpanded) {
-                    ForEach(remainingClonedItems) { item in
+            ForEach(filteredOwnerSections) { section in
+                Section(isExpanded: ownerExpansionBinding(for: section.id)) {
+                    ForEach(section.items) { item in
                         repositoryRow(item)
                     }
                 } header: {
-                    Text("Cloned")
-                }
-            }
-
-            if !remainingGitHubItems.isEmpty {
-                Section(isExpanded: $isGitHubExpanded) {
-                    ForEach(remainingGitHubItems) { item in
-                        repositoryRow(item)
-                    }
-                } header: {
-                    Text("GitHub")
-                }
-            }
-
-            if !remainingLocalOnlyItems.isEmpty {
-                Section(isExpanded: $isLocalOnlyExpanded) {
-                    ForEach(remainingLocalOnlyItems) { item in
-                        repositoryRow(item)
-                    }
-                } header: {
-                    Text("Local Only")
-                }
-            }
-
-            if store.isLoadingCatalog && store.catalogItems.isEmpty {
-                Section {
-                    ProgressView("Loading repositories…")
-                }
-            } else if store.catalogItems.isEmpty {
-                Section {
-                    Text("Sign in to list GitHub repositories, or use Open Folder to choose a local clone.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    Text(section.title)
                 }
             }
         }
         .listStyle(.sidebar)
-        .navigationTitle("Repositories")
     }
 
-    private var recentItemIDs: Set<String> {
-        Set(recentItems.map(\.id))
+    // MARK: - Sections
+
+    private var filteredRecentItems: [RepositoryCatalogItem] {
+        filter(recentItems)
+    }
+
+    private var filteredOwnerSections: [OwnerSection] {
+        ownerSections.compactMap { section in
+            let items = filter(section.items)
+            guard !items.isEmpty else { return nil }
+            return OwnerSection(id: section.id, title: section.title, items: items)
+        }
     }
 
     private var recentItems: [RepositoryCatalogItem] {
         let order = store.recentRepositoryPathOrder
         var seen = Set<String>()
 
-        return order.compactMap { path in
-            guard let item = store.catalogItems.first(where: { item in
-                guard let localURL = item.localURL else { return false }
-                return RepoAccessManager.normalizedPath(localURL) == path
+        return order.prefix(3).compactMap { path in
+            guard let item = store.catalogItems.first(where: {
+                RepoAccessManager.normalizedPath($0.localURL) == path
             }) else {
                 return nil
             }
@@ -108,114 +108,117 @@ struct RepositorySidebarView: View {
         }
     }
 
-    private var remainingClonedItems: [RepositoryCatalogItem] {
-        store.catalogItems.filter { $0.source == .cloned && !recentItemIDs.contains($0.id) }
+    private var ownerSections: [OwnerSection] {
+        let grouped = Dictionary(grouping: store.catalogItems) { $0.owner }
+
+        return grouped.keys.sorted { $0.localizedStandardCompare($1) == .orderedAscending }.map { owner in
+            OwnerSection(
+                id: owner,
+                title: owner,
+                items: grouped[owner]?.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending } ?? []
+            )
+        }
     }
 
-    private var remainingGitHubItems: [RepositoryCatalogItem] {
-        store.catalogItems.filter { $0.source == .github && !recentItemIDs.contains($0.id) }
+    private func filter(_ items: [RepositoryCatalogItem]) -> [RepositoryCatalogItem] {
+        guard !searchText.isEmpty else { return items }
+        let query = searchText.lowercased()
+        return items.filter { item in
+            item.name.lowercased().contains(query)
+                || item.owner.lowercased().contains(query)
+                || (item.fullName?.lowercased().contains(query) ?? false)
+        }
     }
 
-    private var remainingLocalOnlyItems: [RepositoryCatalogItem] {
-        store.catalogItems.filter { $0.source == .localOnly && !recentItemIDs.contains($0.id) }
+    private func ownerExpansionBinding(for owner: String) -> Binding<Bool> {
+        Binding(
+            get: { expandedOwners.contains(owner) },
+            set: { isExpanded in
+                if isExpanded {
+                    expandedOwners.insert(owner)
+                } else {
+                    expandedOwners.remove(owner)
+                }
+            }
+        )
     }
+
+    // MARK: - Rows
 
     @ViewBuilder
     private func repositoryRow(_ item: RepositoryCatalogItem) -> some View {
         HStack(spacing: 8) {
-            availabilityBadge(for: item)
-                .frame(width: 18, alignment: .center)
-
             Button {
                 Task { await store.openCatalogItem(item) }
             } label: {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(item.title)
-                        .fontWeight(isSelected(item) ? .semibold : .regular)
-                    Text(rowSubtitle(for: item))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
+                Text(item.name)
+                    .fontWeight(isSelected(item) ? .semibold : .regular)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
             .buttonStyle(.plain)
 
             Menu {
-                repositoryMenu(for: item)
+                repositoryItemActions(for: item)
             } label: {
                 Image(systemName: "ellipsis.circle")
                     .symbolRenderingMode(.hierarchical)
-                    .foregroundStyle(Color.primary)
+                    .foregroundStyle(Color(nsColor: .secondaryLabelColor))
             }
             .menuStyle(.borderlessButton)
             .fixedSize()
-            .help("Repository actions")
+            .opacity(showRepositoryMenu(for: item) ? 1 : 0)
+            .allowsHitTesting(showRepositoryMenu(for: item))
         }
         .listRowBackground(isSelected(item) ? Color.accentColor.opacity(0.12) : Color.clear)
-    }
-
-    @ViewBuilder
-    private func repositoryMenu(for item: RepositoryCatalogItem) -> some View {
-        if item.isAvailableLocally {
-            Button("Open") {
-                Task { await store.openCatalogItem(item) }
-            }
-            Button("Reveal in Finder") {
-                store.revealCatalogItemInFinder(item)
-            }
+        .contextMenu {
+            repositoryItemActions(for: item)
         }
-
-        if item.source == .github || item.source == .cloned {
-            if item.isAvailableLocally {
-                Button("Choose Different Folder…") {
-                    Task { await store.locateLocalFolder(for: item) }
-                }
-                Button("Remove Local Link") {
-                    Task { await store.unlinkLocalFolder(for: item) }
-                }
-            } else {
-                Button("Locate on This Mac…") {
-                    Task { await store.locateLocalFolder(for: item) }
-                }
-            }
-
-            if item.htmlURL != nil {
-                Button("Open on GitHub") {
-                    store.openCatalogItemOnGitHub(item)
-                }
-            }
+        .onHover { isHovering in
+            hoveredRepositoryID = isHovering ? item.id : nil
         }
     }
 
-    @ViewBuilder
-    private func availabilityBadge(for item: RepositoryCatalogItem) -> some View {
-        if item.isAvailableLocally {
-            Image(systemName: "checkmark.circle.fill")
-                .symbolRenderingMode(.hierarchical)
-                .help("Linked on this Mac")
-        } else if item.source == .github || item.source == .cloned {
-            Image(systemName: item.source == .cloned ? "arrow.down.circle" : "icloud")
-                .symbolRenderingMode(.hierarchical)
-                .help("Not linked — use the menu to locate the local folder")
-        } else {
-            Color.clear
-                .frame(width: 18, height: 18)
-        }
-    }
-
-    private func rowSubtitle(for item: RepositoryCatalogItem) -> String {
-        if item.isAvailableLocally, let path = item.localPathSubtitle {
-            if let fullName = item.subtitle, item.source == .github || item.source == .cloned {
-                return "\(fullName) · \(path)"
-            }
-            return path
-        }
-        return item.subtitle ?? "Local folder"
+    private func showRepositoryMenu(for item: RepositoryCatalogItem) -> Bool {
+        hoveredRepositoryID == item.id || isSelected(item)
     }
 
     private func isSelected(_ item: RepositoryCatalogItem) -> Bool {
-        guard let localURL = item.localURL, let repoURL = store.repoURL else { return false }
-        return RepoAccessManager.normalizedPath(localURL) == RepoAccessManager.normalizedPath(repoURL)
+        guard let repoURL = store.repoURL else { return false }
+        return RepoAccessManager.normalizedPath(item.localURL) == RepoAccessManager.normalizedPath(repoURL)
     }
+
+    @ViewBuilder
+    private func repositoryItemActions(for item: RepositoryCatalogItem) -> some View {
+        Button("Reveal in Finder") {
+            store.revealCatalogItemInFinder(item)
+        }
+        if item.htmlURL != nil {
+            Button("Open on GitHub") {
+                store.openCatalogItemOnGitHub(item)
+            }
+        }
+        Menu("Open In") {
+            let editors = ExternalEditorDiscovery.installedEditors()
+            if editors.isEmpty {
+                Button("No Editors Found") {}
+                    .disabled(true)
+            } else {
+                ForEach(editors) { editor in
+                    Button(editor.name) {
+                        store.openCatalogItemInEditor(item, editor: editor)
+                    }
+                }
+            }
+        }
+        Divider()
+        Button("Remove from GitOrigin", role: .destructive) {
+            store.requestRemoveAddedRepository(item)
+        }
+    }
+}
+
+private struct OwnerSection: Identifiable {
+    let id: String
+    let title: String
+    let items: [RepositoryCatalogItem]
 }

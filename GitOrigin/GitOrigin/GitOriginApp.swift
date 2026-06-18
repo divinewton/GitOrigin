@@ -2,9 +2,10 @@
 //  GitOriginApp.swift
 //  GitOrigin
 //
-//  App entry point and menu commands (open repo, sync, stage, commit, branches).
+//  App entry point and menu commands.
 //
 
+import AppKit
 import SwiftUI
 
 @main
@@ -24,26 +25,29 @@ struct GitOriginApp: App {
         }
         .commands {
             CommandGroup(replacing: .newItem) {
-                Button("Open Repository…") {
-                    Task { await store.openRepositoryViaPanel() }
+                Button("Add Existing Repository…") {
+                    store.presentAddExistingSheet()
                 }
-                .keyboardShortcut("o", modifiers: .command)
+                .disabled(!auth.isSignedIn)
+
+                Button("Clone Repository…") {
+                    store.presentCloneSheetIfReady()
+                }
+                .disabled(!auth.isSignedIn)
+
+                Button("Create Repository…") {
+                    store.presentCreateSheet()
+                }
                 .disabled(!auth.isSignedIn)
             }
 
             CommandMenu("Repository") {
-                Button("Open Repository…") {
-                    Task { await store.openRepositoryViaPanel() }
-                }
-                .keyboardShortcut("o", modifiers: .command)
-                .disabled(!auth.isSignedIn)
-
                 Menu("Open Recent") {
                     if store.recentRepositories.isEmpty {
                         Button("No Recent Repositories") {}
                             .disabled(true)
                     } else {
-                        ForEach(store.recentRepositories, id: \.path) { url in
+                        ForEach(store.recentRepositories.prefix(12), id: \.path) { url in
                             Button(url.lastPathComponent) {
                                 Task { await store.openRepository(at: url) }
                             }
@@ -56,6 +60,13 @@ struct GitOriginApp: App {
                     store.closeRepository()
                 }
                 .disabled(!auth.isSignedIn || store.repoURL == nil)
+
+                Button("Reveal in Finder") {
+                    revealCurrentRepositoryInFinder()
+                }
+                .disabled(!auth.isSignedIn || store.repoURL == nil)
+
+                Divider()
 
                 Button("Refresh Status") {
                     Task { await store.refreshStatus(userInitiated: true) }
@@ -80,14 +91,31 @@ struct GitOriginApp: App {
                 }
                 .keyboardShortcut("p", modifiers: [.command, .shift])
                 .disabled(!auth.isSignedIn || store.repoURL == nil || store.isSyncing)
+            }
+
+            CommandMenu("Changes") {
+                Button("Stage All") {
+                    Task { await store.stageAll() }
+                }
+                .disabled(!auth.isSignedIn || store.repoURL == nil || store.changedFiles.isEmpty)
+
+                Button("Unstage All") {
+                    Task { await store.unstageAll() }
+                }
+                .disabled(!auth.isSignedIn || store.repoURL == nil || store.changedFiles.isEmpty)
 
                 Divider()
 
-                Button("Stage Selected File") {
-                    Task { await store.stageSelectedFile() }
+                Button("Discard Changes in Selected File") {
+                    Task {
+                        if let file = store.selectedFile {
+                            await store.discardChanges(for: file)
+                        }
+                    }
                 }
-                .keyboardShortcut("s", modifiers: [.command, .shift])
                 .disabled(!auth.isSignedIn || store.selectedFile == nil || store.repoURL == nil)
+
+                Divider()
 
                 Button("Commit") {
                     Task { await store.commit() }
@@ -182,6 +210,10 @@ struct GitOriginApp: App {
                 .disabled(!auth.isSignedIn || store.repoURL == nil)
             }
         }
+
+        Settings {
+            SettingsView(auth: auth, store: store)
+        }
     }
 
     private var canCommitFromMenu: Bool {
@@ -194,5 +226,10 @@ struct GitOriginApp: App {
 
     private func branchMenuTitle(for branch: GitBranch) -> String {
         branch.isCurrent ? "\(branch.name) ✓" : branch.name
+    }
+
+    private func revealCurrentRepositoryInFinder() {
+        guard let repoURL = store.repoURL else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([repoURL])
     }
 }

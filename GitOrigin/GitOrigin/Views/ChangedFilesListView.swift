@@ -26,6 +26,12 @@ struct ChangedFilesListView: View {
         } else {
             List(store.changedFiles, selection: selectedFileID) { file in
                 HStack(spacing: 8) {
+                    Toggle(isOn: stagingBinding(for: file)) {
+                        EmptyView()
+                    }
+                    .toggleStyle(.checkbox)
+                    .labelsHidden()
+
                     ChangedFileBadge(file: file)
                     Text(file.filepath)
                         .lineLimit(1)
@@ -33,17 +39,80 @@ struct ChangedFilesListView: View {
                 }
                 .tag(file.id)
                 .contextMenu {
-                    Button("Stage") {
-                        Task { await store.stage(file: file) }
+                    Button("Discard Changes", role: .destructive) {
+                        Task { await store.discardChanges(for: file) }
                     }
-                    Button("Unstage") {
-                        Task { await store.unstage(file: file) }
+
+                    Menu("Open In") {
+                        let editors = ExternalEditorDiscovery.installedEditors()
+                        if editors.isEmpty {
+                            Button("No Editors Found") {}
+                                .disabled(true)
+                        } else {
+                            ForEach(editors) { editor in
+                                Button(editor.name) {
+                                    store.openChangedFileInEditor(file, editor: editor)
+                                }
+                            }
+                        }
                     }
                 }
             }
             .listStyle(.inset)
             .scrollContentBackground(.hidden)
+            .safeAreaInset(edge: .top, spacing: 0) {
+                stageAllRow
+            }
         }
+    }
+
+    private var stageAllRow: some View {
+        HStack(spacing: 8) {
+            Toggle(isOn: stageAllBinding) {
+                Text("Stage All")
+                    .font(.subheadline.weight(.medium))
+            }
+            .toggleStyle(.checkbox)
+            Spacer()
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(.bar)
+    }
+
+    private var allStaged: Bool {
+        !store.changedFiles.isEmpty
+            && store.changedFiles.allSatisfy { $0.stagingState == .staged }
+    }
+
+    private var stageAllBinding: Binding<Bool> {
+        Binding(
+            get: { allStaged },
+            set: { shouldStage in
+                Task {
+                    if shouldStage {
+                        await store.stageAll()
+                    } else {
+                        await store.unstageAll()
+                    }
+                }
+            }
+        )
+    }
+
+    private func stagingBinding(for file: ChangedFile) -> Binding<Bool> {
+        Binding(
+            get: { file.stagingState != .unstaged },
+            set: { isStaged in
+                Task {
+                    if isStaged {
+                        await store.stage(file: file)
+                    } else {
+                        await store.unstage(file: file)
+                    }
+                }
+            }
+        )
     }
 
     private var selectedFileID: Binding<String?> {

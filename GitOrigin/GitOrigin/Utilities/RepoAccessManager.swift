@@ -2,8 +2,7 @@
 //  RepoAccessManager.swift
 //  GitOrigin
 //
-//  NSOpenPanel for choosing a repo folder, security-scoped bookmark persistence,
-//  and explicit GitHub fullName → local folder links (no git probing at catalog time).
+//  NSOpenPanel for choosing a repo folder and security-scoped bookmark persistence.
 //
 
 import AppKit
@@ -12,7 +11,6 @@ import Foundation
 @MainActor
 final class RepoAccessManager {
     private static let recentBookmarksKey = "recentRepositoryBookmarks"
-    private static let githubLinksKey = "githubRepositoryLinks"
     private static let maxRecentCount = 12
 
     /// The repository URL that currently holds an active security-scoped grant.
@@ -28,6 +26,42 @@ final class RepoAccessManager {
         panel.allowsMultipleSelection = false
         panel.canCreateDirectories = false
         panel.prompt = "Open"
+
+        guard panel.runModal() == .OK, let url = panel.url else {
+            return nil
+        }
+
+        return url.standardizedFileURL
+    }
+
+    /// Chooses a parent folder; used for the default clone location setup.
+    func promptForParentDirectory() -> URL? {
+        let panel = NSOpenPanel()
+        panel.title = "Choose Clone Location"
+        panel.message = "GitOrigin will create a GitOrigin folder here for your clones."
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        panel.prompt = "Choose"
+
+        guard panel.runModal() == .OK, let url = panel.url else {
+            return nil
+        }
+
+        return url.standardizedFileURL
+    }
+
+    /// Chooses a folder to store a newly created repository.
+    func promptForDestinationDirectory() -> URL? {
+        let panel = NSOpenPanel()
+        panel.title = "Choose Folder"
+        panel.message = "Select where this repository should live on your Mac."
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        panel.prompt = "Choose"
 
         guard panel.runModal() == .OK, let url = panel.url else {
             return nil
@@ -79,61 +113,6 @@ final class RepoAccessManager {
         }
 
         UserDefaults.standard.set(bookmarks, forKey: Self.recentBookmarksKey)
-    }
-
-    /// Saves an explicit link between a GitHub `owner/name` and a local folder bookmark.
-    func linkGitHubRepository(fullName: String, localURL: URL) {
-        guard let bookmark = makeBookmark(for: localURL) else { return }
-        var links = loadGitHubLinks()
-        links[fullName] = bookmark
-        UserDefaults.standard.set(links, forKey: Self.githubLinksKey)
-        addRecentRepository(localURL)
-    }
-
-    func unlinkGitHubRepository(fullName: String) {
-        var links = loadGitHubLinks()
-        links.removeValue(forKey: fullName)
-        UserDefaults.standard.set(links, forKey: Self.githubLinksKey)
-    }
-
-    /// All saved GitHub fullName → local folder links.
-    func allGitHubLinks() -> [String: URL] {
-        var links: [String: URL] = [:]
-        for (fullName, data) in loadGitHubLinks() {
-            guard let url = resolveBookmarkData(data) else { continue }
-            links[fullName] = url.standardizedFileURL
-        }
-        return links
-    }
-
-    /// GitHub full name linked to a local path, if any.
-    func linkedFullName(forLocalPath path: String) -> String? {
-        let targetPath = Self.normalizedPath(URL(fileURLWithPath: path, isDirectory: true))
-        for (fullName, data) in loadGitHubLinks() {
-            guard let url = resolveBookmarkData(data) else { continue }
-            if Self.normalizedPath(url) == targetPath {
-                return fullName
-            }
-        }
-        return nil
-    }
-
-    /// Resolved local folder for a linked GitHub repository (bookmark only — no file I/O).
-    func linkedLocalURL(forGitHubFullName fullName: String) -> URL? {
-        guard let data = loadGitHubLinks()[fullName],
-              let url = resolveBookmarkData(data) else {
-            return nil
-        }
-        return url.standardizedFileURL
-    }
-
-    /// Normalized paths for all folders linked to a GitHub repository.
-    func linkedLocalPaths() -> Set<String> {
-        Set(
-            loadGitHubLinks().values.compactMap { data in
-                resolveBookmarkData(data).map { Self.normalizedPath($0) }
-            }
-        )
     }
 
     /// Recent repository paths, most recently opened first (bookmark paths only).
@@ -191,10 +170,6 @@ final class RepoAccessManager {
         UserDefaults.standard.array(forKey: Self.recentBookmarksKey) as? [Data] ?? []
     }
 
-    private func loadGitHubLinks() -> [String: Data] {
-        UserDefaults.standard.dictionary(forKey: Self.githubLinksKey) as? [String: Data] ?? [:]
-    }
-
     private func makeBookmark(for url: URL) -> Data? {
         try? url.bookmarkData(
             options: .withSecurityScope,
@@ -205,14 +180,6 @@ final class RepoAccessManager {
 
     private func resolveSavedBookmark(matchingPath targetPath: String) -> URL? {
         for data in loadRecentBookmarks() {
-            if let resolved = resolveBookmarkData(data),
-               Self.normalizedPath(resolved) == targetPath,
-               startAccess(resolved) {
-                return resolved
-            }
-        }
-
-        for (_, data) in loadGitHubLinks() {
             if let resolved = resolveBookmarkData(data),
                Self.normalizedPath(resolved) == targetPath,
                startAccess(resolved) {

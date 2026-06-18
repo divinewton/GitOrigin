@@ -36,6 +36,24 @@ enum GitRemoteURLParser {
         return URL(string: urlString)!
     }
 
+    /// Parses `https://github.com/owner/repo` or `owner/repo` input.
+    static func parseGitHubReference(from input: String) -> (owner: String, name: String)? {
+        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        if trimmed.contains("github.com") {
+            return parseGitHubRepository(from: trimmed)
+        }
+
+        let parts = trimmed.split(separator: "/").map(String.init)
+        guard parts.count == 2 else { return nil }
+        return (owner: parts[0], name: stripGitSuffix(parts[1]))
+    }
+
+    static func httpsCloneURL(owner: String, name: String) -> URL {
+        URL(string: "https://github.com/\(owner)/\(name).git")!
+    }
+
     private static func parseSSHPath(_ path: String) -> (owner: String, name: String)? {
         let parts = path.split(separator: "/").map(String.init)
         guard parts.count >= 2 else { return nil }

@@ -28,23 +28,6 @@ struct DiffDetailView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .navigationTitle(store.selectedFile?.filepath ?? "Diff")
-        .toolbar {
-            ToolbarItemGroup {
-                Button {
-                    Task { await store.stageSelectedFile() }
-                } label: {
-                    Label("Stage", systemImage: "plus.circle")
-                }
-                .disabled(store.selectedFile == nil)
-
-                Button {
-                    Task { await store.unstageSelectedFile() }
-                } label: {
-                    Label("Unstage", systemImage: "minus.circle")
-                }
-                .disabled(store.selectedFile == nil)
-            }
-        }
     }
 
     @ViewBuilder

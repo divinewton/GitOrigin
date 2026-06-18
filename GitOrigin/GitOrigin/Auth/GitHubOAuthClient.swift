@@ -21,6 +21,7 @@ struct GitHubAuthenticatedUser: Sendable {
 }
 
 struct GitHubRemoteRepository: Sendable, Equatable {
+    let owner: String
     let fullName: String
     let name: String
     let htmlURL: URL
@@ -242,7 +243,10 @@ actor GitHubOAuthClient {
                   let cloneURL = URL(string: item.cloneURL) else {
                 return nil
             }
+            let parts = item.fullName.split(separator: "/").map(String.init)
+            guard parts.count == 2 else { return nil }
             return GitHubRemoteRepository(
+                owner: parts[0],
                 fullName: item.fullName,
                 name: item.name,
                 htmlURL: htmlURL,
@@ -250,6 +254,92 @@ actor GitHubOAuthClient {
                 defaultBranch: item.defaultBranch
             )
         }
+    }
+
+    func createRepository(
+        name: String,
+        description: String,
+        isPrivate: Bool,
+        accessToken: String
+    ) async throws -> GitHubRemoteRepository {
+        let url = URL(string: "https://api.github.com/user/repos")!
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        request.setValue("GitOrigin", forHTTPHeaderField: "User-Agent")
+
+        let payload: [String: Any] = [
+            "name": name,
+            "description": description,
+            "private": isPrivate,
+            "auto_init": true,
+        ]
+        request.httpBody = try JSONSerialization.data(withJSONObject: payload)
+
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw GitHubOAuthClientError.invalidResponse
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            let message = String(data: data, encoding: .utf8) ?? "Unknown error"
+            throw GitHubOAuthClientError.httpFailure(http.statusCode, message)
+        }
+
+        let item = try JSONDecoder().decode(RemoteRepositoryResponse.self, from: data)
+        guard let htmlURL = URL(string: item.htmlURL),
+              let cloneURL = URL(string: item.cloneURL) else {
+            throw GitHubOAuthClientError.invalidResponse
+        }
+        let parts = item.fullName.split(separator: "/").map(String.init)
+        guard parts.count == 2 else { throw GitHubOAuthClientError.invalidResponse }
+        return GitHubRemoteRepository(
+            owner: parts[0],
+            fullName: item.fullName,
+            name: item.name,
+            htmlURL: htmlURL,
+            cloneURL: cloneURL,
+            defaultBranch: item.defaultBranch
+        )
+    }
+
+    func fetchRepository(
+        owner: String,
+        repo: String,
+        accessToken: String?
+    ) async throws -> GitHubRemoteRepository {
+        let url = URL(string: "https://api.github.com/repos/\(owner)/\(repo)")!
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        request.setValue("GitOrigin", forHTTPHeaderField: "User-Agent")
+        if let accessToken {
+            request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        }
+
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw GitHubOAuthClientError.invalidResponse
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            let message = String(data: data, encoding: .utf8) ?? "Unknown error"
+            throw GitHubOAuthClientError.httpFailure(http.statusCode, message)
+        }
+
+        let item = try JSONDecoder().decode(RemoteRepositoryResponse.self, from: data)
+        guard let htmlURL = URL(string: item.htmlURL),
+              let cloneURL = URL(string: item.cloneURL) else {
+            throw GitHubOAuthClientError.invalidResponse
+        }
+        return GitHubRemoteRepository(
+            owner: owner,
+            fullName: item.fullName,
+            name: item.name,
+            htmlURL: htmlURL,
+            cloneURL: cloneURL,
+            defaultBranch: item.defaultBranch
+        )
     }
 
     func fetchCurrentUser(accessToken: String) async throws -> GitHubAuthenticatedUser {

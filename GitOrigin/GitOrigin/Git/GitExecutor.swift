@@ -123,6 +123,20 @@ actor GitExecutor {
         try throwIfFailed(result, arguments: ["restore", "--staged", "--", "."])
     }
 
+    func discardChanges(for file: ChangedFile, in directory: URL) async throws {
+        if file.status == .untracked {
+            let fileURL = directory.appendingPathComponent(file.filepath)
+            if FileManager.default.fileExists(atPath: fileURL.path) {
+                try FileManager.default.removeItem(at: fileURL)
+            }
+            return
+        }
+
+        let arguments = ["restore", "--staged", "--worktree", "--", file.filepath]
+        let result = try await run(arguments, in: directory)
+        try throwIfFailed(result, arguments: arguments)
+    }
+
     func hasStagedChanges(in directory: URL) async throws -> Bool {
         let result = try await run(["diff", "--cached", "--quiet"], in: directory)
         return result.exitCode == 1
@@ -283,6 +297,15 @@ actor GitExecutor {
     func push(setUpstream branch: String, remote: String = "origin", in directory: URL) async throws {
         let result = try await run(["push", "-u", remote, branch], in: directory, usesGitHubCredentials: true)
         try throwIfFailed(result, arguments: ["push", "-u", remote, branch])
+    }
+
+    func clone(from remoteURL: String, into directoryName: String, parentDirectory: URL) async throws {
+        let result = try await run(
+            ["clone", remoteURL, directoryName],
+            in: parentDirectory,
+            usesGitHubCredentials: true
+        )
+        try throwIfFailed(result, arguments: ["clone"])
     }
 
     private func diffArguments(for file: ChangedFile) -> [String] {

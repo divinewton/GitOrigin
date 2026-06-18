@@ -17,15 +17,12 @@ struct GitHubSession: Equatable, Sendable {
 
 enum GitHubAuthError: LocalizedError, Equatable {
     case signInCancelled
-    case keychainFailure(String)
     case networkFailure(String)
 
     var errorDescription: String? {
         switch self {
         case .signInCancelled:
             "GitHub sign-in was cancelled."
-        case .keychainFailure(let message):
-            message
         case .networkFailure(let message):
             message
         }
@@ -60,12 +57,12 @@ final class GitHubAuthService {
         guard session == nil else { return }
 
         do {
-            guard let token = try GitHubKeychain.loadAccessToken() else { return }
+            guard let token = GitHubKeychain.loadAccessToken() else { return }
             let user = try await oauth.fetchCurrentUser(accessToken: token)
             session = GitHubSession(login: user.login, avatarURL: user.avatarURL)
             await GitExecutor.shared.setGitHubAccessToken(token)
         } catch {
-            try? GitHubKeychain.deleteAccessToken()
+            GitHubKeychain.deleteAccessToken()
             session = nil
             await GitExecutor.shared.setGitHubAccessToken(nil)
         }
@@ -95,7 +92,7 @@ final class GitHubAuthService {
                     interval: authorization.pollingInterval
                 )
 
-                try GitHubKeychain.saveAccessToken(token)
+                GitHubKeychain.saveAccessToken(token)
 
                 let user = try await oauth.fetchCurrentUser(accessToken: token)
                 session = GitHubSession(login: user.login, avatarURL: user.avatarURL)
@@ -104,8 +101,6 @@ final class GitHubAuthService {
                 lastError = .signInCancelled
             } catch let error as GitHubOAuthClientError {
                 lastError = .networkFailure(error.localizedDescription ?? "GitHub sign-in failed.")
-            } catch let error as KeychainError {
-                lastError = .keychainFailure(error.localizedDescription ?? "Could not save sign-in session.")
             } catch {
                 lastError = .networkFailure(error.localizedDescription)
             }
@@ -126,7 +121,7 @@ final class GitHubAuthService {
         session = nil
         lastError = nil
 
-        try? GitHubKeychain.deleteAccessToken()
+        GitHubKeychain.deleteAccessToken()
         Task { await GitExecutor.shared.setGitHubAccessToken(nil) }
     }
 

@@ -2,7 +2,7 @@
 //  CommitBoxView.swift
 //  GitOrigin
 //
-//  Summary/description fields plus stage and commit actions at the bottom of detail.
+//  Summary, description, co-authors, and commit action at the bottom of detail.
 //
 
 import SwiftUI
@@ -14,6 +14,7 @@ struct CommitBoxView: View {
     private enum CommitField: Hashable {
         case summary
         case description
+        case coAuthors
     }
 
     var body: some View {
@@ -41,30 +42,14 @@ struct CommitBoxView: View {
                 .lineLimit(2...4)
                 .focused($focusedField, equals: .description)
 
-            HStack(spacing: 8) {
-                Button("Stage") {
-                    Task { await store.stageSelectedFile() }
-                }
-                .disabled(store.selectedFile == nil)
+            TextField("Co-authors (optional)", text: $store.commitCoAuthors, axis: .vertical)
+                .textFieldStyle(.roundedBorder)
+                .lineLimit(1...4)
+                .focused($focusedField, equals: .coAuthors)
 
-                Button("Unstage") {
-                    Task { await store.unstageSelectedFile() }
-                }
-                .disabled(store.selectedFile == nil)
-
-                Spacer()
-
-                Menu("All") {
-                    Button("Stage All") {
-                        Task { await store.stageAll() }
-                    }
-                    Button("Unstage All") {
-                        Task { await store.unstageAll() }
-                    }
-                }
-                .disabled(store.changedFiles.isEmpty)
-            }
-            .controlSize(.small)
+            Text("One co-author per line: Name (email@example.com)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
 
             Button(commitButtonTitle) {
                 Task { await store.commit() }
